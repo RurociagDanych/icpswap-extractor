@@ -1,0 +1,40 @@
+aws_region  = "us-east-1"
+name_prefix = "icpswap-extractor"
+
+# Required. Read this from terraform/aws-storage outputs.
+bucket_name = "my-existing-raw-data-bucket"
+
+# For tests and low-friction evaluation only: default to the account default VPC
+# so you do not need to provision dedicated networking just to try the stack.
+use_default_vpc = true
+
+# Required only when use_default_vpc = false.
+vpc_id     = null
+subnet_ids = []
+
+# Optional. Leave empty to use the managed ECR repository with the :latest tag.
+container_image = ""
+
+container_command = [
+  "node",
+  "dist/index.js",
+  "--mode",
+  "incremental",
+  "--page-size",
+  "1000",
+  "--concurrency",
+  "5",
+]
+
+s3_prefix           = "icpswap"
+assign_public_ip    = true
+schedule_expression = "rate(24 hour)"
+
+# Optional. Subscribe an email to failed-task alerts (confirm the subscription email after apply).
+alert_email = ""
+
+tags = {
+  Owner       = "data-platform"
+  CostCenter  = "analytics"
+  Environment = "prod"
+}

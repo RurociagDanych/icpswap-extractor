@@ -1,0 +1,14 @@
+aws_region  = "us-east-1"
+name_prefix = "icpswap-extractor"
+
+# Optional. Leave empty to let Terraform create a deterministic name.
+bucket_name = ""
+
+# Days to keep noncurrent object versions before expiring them.
+noncurrent_version_expiration_days = 30
+
+tags = {
+  Owner       = "data-platform"
+  CostCenter  = "analytics"
+  Environment = "prod"
+}

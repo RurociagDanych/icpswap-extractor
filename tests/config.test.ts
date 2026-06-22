@@ -60,6 +60,11 @@ test('parseArgs reads REST flags and defaults mode to sync', () => {
   assert.equal(cfg.incrementalOverlapMs, 300000);
   assert.equal(cfg.actionTypes, 'Swap,AddLiquidity,DecreaseLiquidity,Claim');
   assert.equal(cfg.backfillFloor, undefined);
+  assert.equal(cfg.backfillPagesPerFile, 50);
+});
+
+test('parseArgs rejects backfill-pages-per-file below 1', () => {
+  assert.throws(() => parseArgs(['--backfill-pages-per-file', '0']), /backfill-pages-per-file/);
 });
 
 test('parseArgs parses explicit REST flags', () => {

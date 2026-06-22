@@ -18,6 +18,7 @@ export type Config = {
   backfillOverlapMs: number;
   incrementalOverlapMs: number;
   backfillFloor?: number;
+  backfillPagesPerFile: number;
   actionTypes: string;
 };
 
@@ -42,6 +43,7 @@ export function parseArgs(args: string[] = process.argv.slice(2)): Config {
   const incrementalOverlapMs = Number(get('incremental-overlap-ms', '300000'));
   const backfillFloorRaw = get('backfill-floor');
   const backfillFloor = backfillFloorRaw === undefined ? undefined : Number(backfillFloorRaw);
+  const backfillPagesPerFile = Number(get('backfill-pages-per-file', '50'));
 
   if (!Number.isFinite(pageSize) || pageSize < 1 || pageSize > 1000) {
     throw new Error(`Invalid --page-size=${pageSize}. Allowed range: 1..1000`);
@@ -64,6 +66,9 @@ export function parseArgs(args: string[] = process.argv.slice(2)): Config {
   if (backfillFloor !== undefined && (!Number.isFinite(backfillFloor) || backfillFloor < 0)) {
     throw new Error(`Invalid --backfill-floor=${backfillFloorRaw}. Must be a non-negative epoch-ms`);
   }
+  if (!Number.isFinite(backfillPagesPerFile) || backfillPagesPerFile < 1) {
+    throw new Error(`Invalid --backfill-pages-per-file=${backfillPagesPerFile}. Must be >= 1`);
+  }
 
   return {
     host: get('host', 'https://ic0.app')!,
@@ -83,6 +88,7 @@ export function parseArgs(args: string[] = process.argv.slice(2)): Config {
     backfillOverlapMs,
     incrementalOverlapMs,
     backfillFloor,
+    backfillPagesPerFile,
     actionTypes: get('action-types', 'Swap,AddLiquidity,DecreaseLiquidity,Claim')!,
   };
 }

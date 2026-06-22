@@ -65,6 +65,7 @@ Run modes:
 | `--backfill-overlap-ms` | `3600000` | overlap below the canister seam, in ms |
 | `--incremental-overlap-ms` | `300000` | REST incremental re-fetch window, in ms |
 | `--backfill-floor` | — | explicit floor (epoch ms) when `canisterMaxTxTime` is absent |
+| `--backfill-pages-per-file` | `50` | REST pages per committed backfill file (≥1) |
 | `--action-types` | `Swap,AddLiquidity,DecreaseLiquidity,Claim` | REST `actionTypes` filter |
 | `--s3-bucket` | env `S3_BUCKET` | target bucket; omit for local output |
 | `--s3-prefix` | env `S3_PREFIX` or `icpswap` | key prefix in the bucket |
@@ -75,7 +76,7 @@ S3 layout (source-separated):
 
 ```
 s3://<bucket>/<prefix>/canister/<runId>/<nnnn>_<canisterId>.csv
-s3://<bucket>/<prefix>/rest/backfill/<runId>/transactions_backfill_<runId>.csv
+s3://<bucket>/<prefix>/rest/backfill/<runId>/transactions_backfill_<endSnapshot>_p<NNNNNN>.csv
 s3://<bucket>/<prefix>/rest/incremental/<runId>/transactions_incremental_<runId>.csv
 s3://<bucket>/<prefix>/<segment>/<runId>/manifest.json
 s3://<bucket>/<prefix>/state/state.json

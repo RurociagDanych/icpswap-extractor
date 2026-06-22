@@ -22,38 +22,71 @@ export async function runBackfill(cfg: Config, target: StorageTarget, logger: Lo
   const endSnapshot = rest.backfillCursor?.endSnapshot ?? deps.now();
   const floor = computeBackfillFloor(state.canisterMaxTxTime, cfg.backfillOverlapMs, cfg.backfillFloor);
   let page = rest.backfillCursor?.nextPage ?? 1;
-  logger.info('starting backfill', { floor, endSnapshot, fromPage: page });
+  logger.info('starting backfill', {
+    floor, endSnapshot, fromPage: page,
+    restPageSize: cfg.restPageSize, pagesPerFile: cfg.backfillPagesPerFile,
+  });
 
-  const sink = target.createSink(`transactions_backfill_${cfg.runId}.csv`, restHeaders);
-  let written = 0;
+  const manifestEntries: ManifestEntry[] = [];
+  let totalWritten = 0;
   let total = 0;
   let maxSeen = 0;
-  let writeHeader = true;
+  let done = false;
 
-  for (;;) {
-    const data = await deps.fetchData({
-      baseUrl: cfg.restBaseUrl, page, limit: cfg.restPageSize,
-      actionTypes: cfg.actionTypes, begin: floor, end: endSnapshot,
-    });
-    total = data.totalElements;
-    const content = data.content;
-    if (content.length === 0) break;
+  // Each batch is written to its own committed file BEFORE the durable cursor advances,
+  // so an interrupted run never leaves the cursor past data that was not persisted.
+  while (!done) {
+    const startPage = page;
+    const fileName = `transactions_backfill_${endSnapshot}_p${String(startPage).padStart(6, '0')}.csv`;
+    let sink: ReturnType<StorageTarget['createSink']> | undefined;
+    let fileRows = 0;
+    let writeHeader = true;
+    let pagesInFile = 0;
+    let oldestTxTime: number | undefined;
 
-    await sink.append(content.map(rowFromRestTx), writeHeader);
-    writeHeader = false;
-    written += content.length;
-    maxSeen = maxTxTime(content, maxSeen);
+    while (pagesInFile < cfg.backfillPagesPerFile) {
+      const data = await deps.fetchData({
+        baseUrl: cfg.restBaseUrl, page, limit: cfg.restPageSize,
+        actionTypes: cfg.actionTypes, begin: floor, end: endSnapshot,
+      });
+      total = data.totalElements;
+      const content = data.content;
+      if (content.length === 0) { done = true; break; }
 
-    rest.backfillCursor = { endSnapshot, nextPage: page + 1 };
-    rest.backfillFloor = floor;
-    state.rest = rest;
-    await target.saveState(state);
+      if (!sink) sink = target.createSink(fileName, restHeaders);
+      await sink.append(content.map(rowFromRestTx), writeHeader);
+      writeHeader = false;
+      fileRows += content.length;
+      maxSeen = maxTxTime(content, maxSeen);
+      oldestTxTime = content[content.length - 1]?.txTime;
+      pagesInFile += 1;
 
-    if (reachedFloor(content, floor) || isShortPage(content, cfg.restPageSize)) break;
-    page += 1;
+      const stop = reachedFloor(content, floor) || isShortPage(content, cfg.restPageSize);
+      logger.info('backfill page', {
+        page, rows: content.length, fileRows, oldestTxTime,
+        msAboveFloor: oldestTxTime !== undefined ? oldestTxTime - floor : undefined,
+        totalElements: total,
+      });
+      page += 1;
+      if (stop) { done = true; break; }
+    }
+
+    if (sink) {
+      const stats = await sink.close(); // commits this file to S3
+      manifestEntries.push({ storageId: `rest-backfill-p${startPage}`, total, written: fileRows, sink: stats } as ManifestEntry);
+      totalWritten += fileRows;
+      // Only now is the batch durable — advance the cursor past it.
+      rest.backfillCursor = { endSnapshot, nextPage: page };
+      rest.backfillFloor = floor;
+      state.rest = rest;
+      await target.saveState(state);
+      logger.info('backfill batch committed', {
+        file: stats.location, startPage, endPage: page - 1, rows: fileRows,
+        oldestTxTime, cumulativeRows: totalWritten,
+      });
+    }
   }
 
-  const stats = await sink.close();
   rest.backfillComplete = true;
   // Seed the incremental watermark to the newest record backfill captured (it pages
   // from the snapshot down to the floor, so page 1 holds the newest rows). Without
@@ -64,8 +97,11 @@ export async function runBackfill(cfg: Config, target: StorageTarget, logger: Lo
   state.mode = 'backfill';
   state.lastRunAt = new Date().toISOString();
   await target.saveState(state);
-  await target.writeManifest(buildManifest(cfg, [{ storageId: 'rest-backfill', total, written, sink: stats } as ManifestEntry]));
-  logger.info('backfill done', { written, floor, endSnapshot });
+  await target.writeManifest(buildManifest(cfg, manifestEntries));
+  logger.info('backfill done', {
+    files: manifestEntries.length, rows: totalWritten, floor, endSnapshot,
+    watermark: rest.incrementalWatermark,
+  });
 }
 
 export async function runIncrementalRest(cfg: Config, target: StorageTarget, logger: Logger, state: EtlState, deps: RestDeps): Promise<void> {

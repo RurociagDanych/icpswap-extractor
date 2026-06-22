@@ -7,6 +7,7 @@ import type { RestFindData, RestTx } from '../src/idl/restTx.js';
 const cfg: any = {
   runId: 'r1', mode: 'backfill', restBaseUrl: 'http://x', restPageSize: 2,
   backfillOverlapMs: 0, incrementalOverlapMs: 0, actionTypes: 'Swap',
+  backfillPagesPerFile: 50,
 };
 
 function fakeTarget() {
@@ -49,6 +50,29 @@ test('runBackfill pages newest->oldest and stops below floor', async () => {
   assert.equal(sinks[0].columns[0], 'tx_hash');      // REST headers used
   assert.equal(getSaved()?.rest?.backfillComplete, true);
   assert.equal(getSaved()?.rest?.incrementalWatermark, 300); // seeded to newest captured txTime
+  assert.equal(sinks.length, 1); // 2 pages fit in one file at pagesPerFile=50
+});
+
+test('runBackfill rotates files and advances the cursor only after each commit', async () => {
+  const pages: Record<number, RestTx[]> = {
+    1: [tx('a', 300), tx('b', 250)],
+    2: [tx('c', 200), tx('d', 90)], // 90 < floor 100 -> stop after this page
+  };
+  const deps: RestDeps = {
+    now: () => 1000,
+    fetchData: async (p) => ({ totalElements: 4, page: p.page, limit: p.limit, content: pages[p.page] ?? [] } as RestFindData),
+  };
+  const state = defaultState();
+  state.canisterMaxTxTime = 100;
+  const { target, sinks, getSaved } = fakeTarget();
+  await runBackfill({ ...cfg, backfillPagesPerFile: 1 }, target, logger, state, deps);
+
+  assert.equal(sinks.length, 2);            // one file per page
+  assert.equal(sinks[0].rows.length, 2);
+  assert.equal(sinks[1].rows.length, 2);
+  assert.equal(sinks[0].closed, true);      // each file committed
+  assert.equal(getSaved()?.rest?.backfillComplete, true);
+  assert.equal(getSaved()?.rest?.backfillCursor?.nextPage, 3); // cursor past both committed pages
 });
 
 test('runIncrementalRest emits only rows past the watermark and dedups', async () => {

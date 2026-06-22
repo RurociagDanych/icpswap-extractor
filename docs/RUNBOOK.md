@@ -48,7 +48,7 @@ npm start -- --mode sync
 | File | Meaning |
 | --- | --- |
 | `NNNN_<canisterId>.csv` | canister-mode swap rows (28-column canister CSV) |
-| `transactions_backfill_<runId>.csv` / `transactions_incremental_<runId>.csv` | REST rows (REST schema) |
+| `transactions_backfill_<endSnapshot>_p<NNNNNN>.csv` (one per page-batch) / `transactions_incremental_<runId>.csv` | REST rows (REST schema) |
 | `manifest_<mode>_<runId>.json` | per-file rows/bytes/sha256 + totals for the run |
 | `state.json` | resume state (canister seam, REST backfill cursor + incremental watermark) |
 | `etl.log` | the same JSON log lines that went to stdout |

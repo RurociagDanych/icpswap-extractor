@@ -20,6 +20,9 @@ Options:
   --backfill-floor <ms>       Epoch-ms floor for backfill/sync when state has no
                               canisterMaxTxTime (e.g. first backfill on a pre-existing
                               bucket). Passed through to backfill and sync modes.
+  --backfill-pages-per-file <n>
+                              REST pages per committed backfill file. Default: 50.
+                              Passed through to backfill and sync modes.
   --build-only                Build and push the image, but do not run ECS task
   --push-only                 Push the already-built local image tag, but do not build or run
   --run-only                  Skip build/push and only run the ECS task
@@ -53,6 +56,7 @@ PAGE_SIZE="1000"
 CONCURRENCY="5"
 OVERLAP="50"
 BACKFILL_FLOOR=""
+BACKFILL_PAGES_PER_FILE=""
 DO_BUILD=1
 DO_PUSH=1
 DO_RUN=1
@@ -90,6 +94,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --backfill-floor)
       BACKFILL_FLOOR="${2:?missing value for --backfill-floor}"
+      shift 2
+      ;;
+    --backfill-pages-per-file)
+      BACKFILL_PAGES_PER_FILE="${2:?missing value for --backfill-pages-per-file}"
       shift 2
       ;;
     --build-only)
@@ -203,6 +211,7 @@ OVERRIDES_JSON="$(
   CONCURRENCY="${CONCURRENCY}" \
   OVERLAP="${OVERLAP}" \
   BACKFILL_FLOOR="${BACKFILL_FLOOR}" \
+  BACKFILL_PAGES_PER_FILE="${BACKFILL_PAGES_PER_FILE}" \
   node --input-type=module -e '
     const mode = process.env.MODE;
     const command = ["node", "dist/index.js", "--mode", mode];
@@ -211,9 +220,12 @@ OVERRIDES_JSON="$(
     if (mode === "canister" || mode === "full") {
       command.push("--page-size", process.env.PAGE_SIZE, "--concurrency", process.env.CONCURRENCY, "--overlap", process.env.OVERLAP);
     }
-    // Floor is only meaningful where backfill runs (backfill, or sync before backfill completes).
+    // These are only meaningful where backfill runs (backfill, or sync before backfill completes).
     if (process.env.BACKFILL_FLOOR && (mode === "backfill" || mode === "sync")) {
       command.push("--backfill-floor", process.env.BACKFILL_FLOOR);
+    }
+    if (process.env.BACKFILL_PAGES_PER_FILE && (mode === "backfill" || mode === "sync")) {
+      command.push("--backfill-pages-per-file", process.env.BACKFILL_PAGES_PER_FILE);
     }
     process.stdout.write(JSON.stringify({
       containerOverrides: [{ name: "etl", command }]

@@ -158,6 +158,15 @@ The script: logs into ECR, `docker build`s from the repo root, pushes `:latest`,
 
 Run `--mode canister` once. After it completes (`canisterArchiveComplete: true` in `state.json`), scheduled `sync` runs handle everything from the REST API and never re-touch the canisters.
 
+**Pre-existing bucket (canister data already present, but `state.json` predates the REST cutover):** the old state has no `canisterMaxTxTime`, so the first backfill needs an explicit floor (epoch-ms of the canister seam). Run it once on Fargate, then let the schedule take over:
+
+```bash
+# one-off backfill in the cloud; floor = a little before the canister cutoff for overlap
+scripts/aws_build_push_and_run.sh --mode backfill --backfill-floor 1780272000000
+```
+
+This sets `rest.backfillComplete: true` and seeds the incremental watermark, after which the scheduled `--mode sync` runs only the REST incremental (no floor needed).
+
 ### Step 3.4 — verify the deployment
 
 ```bash

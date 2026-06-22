@@ -16,7 +16,10 @@ Options:
   --terraform-dir <path>      Terraform AWS compute root. Default: terraform/aws-compute
   --page-size <n>             Override page size for the one-off ECS run. Default: 1000
   --concurrency <n>           Override concurrency for the one-off ECS run. Default: 5
-  --overlap <n>               Override overlap for incremental runs. Default: 50
+  --overlap <n>               Override overlap for the canister archive. Default: 50
+  --backfill-floor <ms>       Epoch-ms floor for backfill/sync when state has no
+                              canisterMaxTxTime (e.g. first backfill on a pre-existing
+                              bucket). Passed through to backfill and sync modes.
   --build-only                Build and push the image, but do not run ECS task
   --push-only                 Push the already-built local image tag, but do not build or run
   --run-only                  Skip build/push and only run the ECS task
@@ -49,6 +52,7 @@ TF_DIR="${REPO_ROOT}/terraform/aws-compute"
 PAGE_SIZE="1000"
 CONCURRENCY="5"
 OVERLAP="50"
+BACKFILL_FLOOR=""
 DO_BUILD=1
 DO_PUSH=1
 DO_RUN=1
@@ -82,6 +86,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --overlap)
       OVERLAP="${2:?missing value for --overlap}"
+      shift 2
+      ;;
+    --backfill-floor)
+      BACKFILL_FLOOR="${2:?missing value for --backfill-floor}"
       shift 2
       ;;
     --build-only)
@@ -194,6 +202,7 @@ OVERRIDES_JSON="$(
   PAGE_SIZE="${PAGE_SIZE}" \
   CONCURRENCY="${CONCURRENCY}" \
   OVERLAP="${OVERLAP}" \
+  BACKFILL_FLOOR="${BACKFILL_FLOOR}" \
   node --input-type=module -e '
     const mode = process.env.MODE;
     const command = ["node", "dist/index.js", "--mode", mode];
@@ -201,6 +210,10 @@ OVERRIDES_JSON="$(
     // (sync/backfill/incremental) rely on their own configured defaults.
     if (mode === "canister" || mode === "full") {
       command.push("--page-size", process.env.PAGE_SIZE, "--concurrency", process.env.CONCURRENCY, "--overlap", process.env.OVERLAP);
+    }
+    // Floor is only meaningful where backfill runs (backfill, or sync before backfill completes).
+    if (process.env.BACKFILL_FLOOR && (mode === "backfill" || mode === "sync")) {
+      command.push("--backfill-floor", process.env.BACKFILL_FLOOR);
     }
     process.stdout.write(JSON.stringify({
       containerOverrides: [{ name: "etl", command }]

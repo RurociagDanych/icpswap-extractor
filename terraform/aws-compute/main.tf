@@ -143,6 +143,9 @@ data "aws_iam_policy_document" "task_s3_access" {
     actions = [
       "s3:GetObject",
       "s3:PutObject",
+      # Required to release the run lock on exit/SIGTERM; without it the lock leaks
+      # until its 6h TTL and blocks the next run.
+      "s3:DeleteObject",
       "s3:AbortMultipartUpload",
       "s3:ListMultipartUploadParts",
     ]

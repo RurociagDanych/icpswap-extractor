@@ -172,19 +172,30 @@ async function run(): Promise<void> {
   const warn: WarnFn = (msg) => logger.warn(msg);
   const target = createStorageTarget(cfg, warn);
 
-  process.on('SIGTERM', () => {
-    logger.error('SIGTERM received - process terminated externally');
-    process.exit(143);
-  });
-  process.on('SIGINT', () => {
-    logger.error('SIGINT received');
-    process.exit(130);
-  });
+  // Release our run lock on external termination too. Fargate stops a task with
+  // SIGTERM (grace period) before SIGKILL, so without this a stopped/replaced task
+  // would leak its lock until the 6h TTL and block the next run.
+  let holdsLock = false;
+  const shutdown = async (signal: string, code: number) => {
+    logger.error(`${signal} received - releasing lock and exiting`);
+    if (holdsLock) {
+      try {
+        await target.releaseRunLock();
+      } catch {
+        // releaseRunLock already logs; never block shutdown on cleanup
+      }
+      holdsLock = false;
+    }
+    process.exit(code);
+  };
+  process.on('SIGTERM', () => void shutdown('SIGTERM', 143));
+  process.on('SIGINT', () => void shutdown('SIGINT', 130));
 
   if (!(await target.acquireRunLock())) {
     logger.warn('another run holds the lock; exiting without work');
     return;
   }
+  holdsLock = true;
 
   try {
     const state = await target.loadState();
@@ -210,7 +221,10 @@ async function run(): Promise<void> {
       await runSync(cfg, target, logger, state, restDeps);
     }
   } finally {
-    await target.releaseRunLock();
+    if (holdsLock) {
+      await target.releaseRunLock();
+      holdsLock = false;
+    }
   }
 }
 

@@ -22,27 +22,35 @@ Local mode needs no AWS account — output goes to `./out/`.
 ```bash
 npm install
 
-# incremental: fetch only new records on the active canister
-npm run dev -- --mode incremental --overlap 50
+# canister: one-time deep-history archive of every storage canister
+# (long; resumable if interrupted). Sets canisterArchiveComplete + canisterMaxTxTime.
+npm run dev -- --mode canister --page-size 1000 --concurrency 5
 
-# full: fetch every storage canister (long; resumable if interrupted)
-npm run dev -- --mode full --page-size 1000 --concurrency 5
+# backfill: REST history newest->oldest down to the canister seam (resumable)
+npm run dev -- --mode backfill
+
+# incremental: new REST transactions since the stored watermark
+npm run dev -- --mode incremental
+
+# sync (default): backfill-if-needed then incremental; never runs canister
+npm run dev -- --mode sync
 ```
 
 Or run the compiled build (what the container runs):
 
 ```bash
 npm run build
-npm start -- --mode incremental --overlap 50
+npm start -- --mode sync
 ```
 
 ### What you get in `./out/`
 
 | File | Meaning |
 | --- | --- |
-| `incremental_<canisterId>.csv` or `NNNN_<canisterId>.csv` | extracted swap rows (28-column CSV) |
+| `NNNN_<canisterId>.csv` | canister-mode swap rows (28-column canister CSV) |
+| `transactions_backfill_<runId>.csv` / `transactions_incremental_<runId>.csv` | REST rows (REST schema) |
 | `manifest_<mode>_<runId>.json` | per-file rows/bytes/sha256 + totals for the run |
-| `state.json` | resume state (per-canister progress, recent hashes) |
+| `state.json` | resume state (canister seam, REST backfill cursor + incremental watermark) |
 | `etl.log` | the same JSON log lines that went to stdout |
 | `run.lock` | present only while a run is active |
 
@@ -50,15 +58,21 @@ npm start -- --mode incremental --overlap 50
 
 | Flag | Default | Notes |
 | --- | --- | --- |
-| `--mode` | `full` | `full` or `incremental` |
-| `--page-size` | `1000` | 1..1000 |
-| `--concurrency` | `5` | 1..20, full mode only |
-| `--overlap` | `50` | incremental re-fetch window for dedupe |
+| `--mode` | `sync` | `sync`, `canister` (alias `full`), `backfill`, `incremental` |
+| `--page-size` | `1000` | 1..1000, canister mode |
+| `--concurrency` | `5` | 1..20, canister mode only |
+| `--overlap` | `50` | canister-mode re-fetch window |
+| `--rest-page-size` | `100` | 1..100 (REST API caps at 100) |
+| `--backfill-overlap-ms` | `3600000` | overlap below the canister seam (ms) |
+| `--incremental-overlap-ms` | `300000` | REST incremental re-fetch window (ms) |
+| `--backfill-floor` | — | explicit floor (epoch ms) if `canisterMaxTxTime` is absent |
 | `--out-dir` / `--state-file` / `--log-file` | under `./out` | local paths |
 
 ### Local gotchas
 
-- **Interrupted full load**: just rerun the same command — completed canisters are skipped via `state.json`.
+- **Interrupted canister archive**: just rerun the same command — completed canisters are skipped via `state.json`.
+- **Interrupted backfill**: rerun `--mode backfill` — it resumes from the saved page cursor against the same `end` snapshot.
+- **Cutover check**: once `state.json` shows `canisterArchiveComplete: true` and `rest.backfillComplete: true`, scheduled `sync` runs only the REST incremental.
 - **Stale lock after a kill**: if a run was killed (Ctrl-C is handled, `kill -9` is not), `./out/run.lock` may remain. A new run within 6 hours will log `another run holds the lock` and exit. Delete it manually: `rm ./out/run.lock`.
 - **Fresh start**: `rm -rf ./out` wipes data, state, and lock.
 
@@ -67,7 +81,7 @@ npm start -- --mode incremental --overlap 50
 ## 2. Run tests
 
 ```bash
-npm test          # node:test suites in tests/ (config, csv, logger, state, storageTarget)
+npm test          # node:test suites in tests/ (config, csv, logger, state, storageTarget, restCsv, restClient, restPaging, restRuns)
 npm run build     # strict TypeScript compile — treat failures as test failures
 ```
 
@@ -116,7 +130,7 @@ cp terraform.tfvars.example terraform.tfvars
 #   use_default_vpc     - true for evaluation; for production set false and fill vpc_id/subnet_ids
 #   schedule_expression - e.g. "rate(24 hour)"; set "" to disable scheduled runs
 #   alert_email         - your email for failure alerts (recommended)
-#   container_command   - default runs incremental mode
+#   container_command   - default runs 'sync' mode (REST backfill-if-needed + incremental)
 terraform init
 terraform apply
 ```
@@ -130,17 +144,19 @@ The helper script reads everything (region, ECR URL, cluster, task definition, n
 ```bash
 cd ../..   # repo root
 
-# first load: full backfill of all canisters
-scripts/aws_build_push_and_run.sh --mode full
+# one-time deep-history archive of all canisters (run this first)
+scripts/aws_build_push_and_run.sh --mode canister
 
-# subsequent ad hoc runs (the scheduler does this automatically)
-scripts/aws_build_push_and_run.sh --mode incremental
+# subsequent runs (the scheduler does this automatically): REST backfill-if-needed + incremental
+scripts/aws_build_push_and_run.sh --mode sync
 
 # push a new image without triggering a run
 scripts/aws_build_push_and_run.sh --build-only
 ```
 
 The script: logs into ECR, `docker build`s from the repo root, pushes `:latest`, and (unless `--build-only`) calls `aws ecs run-task` with the right network configuration and command overrides.
+
+Run `--mode canister` once. After it completes (`canisterArchiveComplete: true` in `state.json`), scheduled `sync` runs handle everything from the REST API and never re-touch the canisters.
 
 ### Step 3.4 — verify the deployment
 
@@ -149,8 +165,9 @@ REGION=$(terraform -chdir=terraform/aws-compute output -raw aws_region)
 BUCKET=$(terraform -chdir=terraform/aws-compute output -raw bucket_name)
 
 # data landed? newest entries should show <runId>/...csv and manifest.json
-aws s3 ls "s3://${BUCKET}/icpswap/full/" --recursive | tail -5
-aws s3 ls "s3://${BUCKET}/icpswap/incremental/" --recursive | tail -5
+aws s3 ls "s3://${BUCKET}/icpswap/canister/" --recursive | tail -5
+aws s3 ls "s3://${BUCKET}/icpswap/rest/backfill/" --recursive | tail -5
+aws s3 ls "s3://${BUCKET}/icpswap/rest/incremental/" --recursive | tail -5
 
 # state object exists?
 aws s3 ls "s3://${BUCKET}/icpswap/state/"
@@ -159,7 +176,7 @@ aws s3 ls "s3://${BUCKET}/icpswap/state/"
 aws logs tail /aws/ecs/icpswap-extractor --region "$REGION" --since 1h
 ```
 
-A healthy run ends with a `full load done` or `incremental done` log line, and the run's `manifest.json` totals match the CSV files next to it.
+A healthy run ends with a `full load done`, `backfill done`, or `rest incremental done` log line, and the run's `manifest.json` totals match the CSV files next to it.
 
 ---
 

@@ -2,14 +2,14 @@ import { Actor, HttpAgent } from '@dfinity/agent';
 import { baseStorageidlFactory, type BaseStorageActor } from './idl/baseStorage.js';
 import { poolInfoidlFactory, type PoolInfoActor, type SwapTx } from './idl/poolInfo.js';
 import { parseArgs, type Config } from './lib/config.js';
-import { rowFromTx } from './lib/csv.js';
+import { headers as canisterHeaders, rowFromTx } from './lib/csv.js';
 import type { CsvSink, SinkStats } from './lib/csvSink.js';
 import { createLogger, type Logger } from './lib/logger.js';
+import { fetchTransactions } from './lib/restClient.js';
+import { runBackfill, runIncrementalRest, runSync, type RestDeps } from './lib/restRuns.js';
 import { withRetry, type WarnFn } from './lib/retry.js';
 import {
-  RECENT_HASHES_LIMIT,
   pushBounded,
-  trimSetKeepLast,
   type CanisterState,
   type EtlState,
 } from './lib/state.js';
@@ -26,7 +26,7 @@ async function fetchCanisterFull(
   sink: CsvSink,
   writeHeader: boolean,
   logger: Logger,
-): Promise<{ written: number; total: number; recentHashes: string[]; sinkStats: SinkStats }> {
+): Promise<{ written: number; total: number; recentHashes: string[]; sinkStats: SinkStats; maxTimestampNs: bigint }> {
   const storage = await getActor<PoolInfoActor>(agent, storageId, poolInfoidlFactory);
   const warn: WarnFn = (msg) => logger.warn(msg, { storageId });
 
@@ -41,12 +41,13 @@ async function fetchCanisterFull(
   if (total === 0) {
     if (writeHeader) await sink.append([], true);
     const sinkStats = await sink.close();
-    return { written: 0, total, recentHashes: [], sinkStats };
+    return { written: 0, total, recentHashes: [], sinkStats, maxTimestampNs: 0n };
   }
 
   let written = 0;
   let offset = 0;
   let headerPending = writeHeader;
+  let maxTimestampNs = 0n;
   const recentHashes: string[] = [];
 
   while (offset < total) {
@@ -65,6 +66,7 @@ async function fetchCanisterFull(
     written += rows.length;
 
     pushBounded(recentHashes, txs.filter((tx) => tx.hash).map((tx) => tx.hash));
+    for (const tx of txs) if (tx.timestamp > maxTimestampNs) maxTimestampNs = tx.timestamp;
 
     if (written % (pageSize * 5) === 0 || written >= total) {
       logger.info('canister progress', { storageId, written, total, pct: Number(((written / total) * 100).toFixed(1)) });
@@ -74,7 +76,7 @@ async function fetchCanisterFull(
   }
 
   const sinkStats = await sink.close();
-  return { written, total, recentHashes, sinkStats };
+  return { written, total, recentHashes, sinkStats, maxTimestampNs };
 }
 
 async function parallelLimit<T>(tasks: (() => Promise<T>)[], limit: number): Promise<T[]> {
@@ -105,6 +107,7 @@ async function runFull(
   logger.info('starting full load', { canisters: orderedStorages.length, pageSize: cfg.pageSize, concurrency: cfg.concurrency });
 
   const manifestEntries: ManifestEntry[] = [];
+  let maxCanisterTsNs = 0n;
   let saveQueue: Promise<void> = Promise.resolve();
   const queueStateSave = async () => {
     saveQueue = saveQueue.then(() => target.saveState(state));
@@ -121,7 +124,7 @@ async function runFull(
     }
 
     logger.info('starting canister', { storageId, index: idx + 1, of: orderedStorages.length });
-    const sink = target.createSink(fileName);
+    const sink = target.createSink(fileName, canisterHeaders);
 
     const result = await fetchCanisterFull(agent, storageId, cfg.pageSize, sink, true, logger);
 
@@ -134,6 +137,7 @@ async function runFull(
     state.canisters[storageId] = canState;
     state.lastRunAt = canState.lastRun;
     state.latestStorageId = newestStorageId;
+    if (result.maxTimestampNs > maxCanisterTsNs) maxCanisterTsNs = result.maxTimestampNs;
     manifestEntries.push({
       storageId,
       total: result.total,
@@ -149,90 +153,14 @@ async function runFull(
   state.mode = 'full';
   state.latestStorageId = newestStorageId;
   state.lastRunAt = new Date().toISOString();
+  // Record the canister↔REST seam (timestamps are nanoseconds) and mark the
+  // one-time archive complete so future runs use only backfill + REST incremental.
+  if (maxCanisterTsNs > 0n) state.canisterMaxTxTime = Number(maxCanisterTsNs / 1_000_000n);
+  state.canisterArchiveComplete = true;
   await target.saveState(state);
   await target.writeManifest(buildManifest(cfg, manifestEntries));
 
-  logger.info('full load done', { rows: totalRows, files: manifestEntries.length, newestStorageId });
-}
-
-async function runIncremental(
-  cfg: Config,
-  agent: HttpAgent,
-  target: StorageTarget,
-  logger: Logger,
-  state: EtlState,
-  activeId: string,
-): Promise<void> {
-  const warn: WarnFn = (msg) => logger.warn(msg, { storageId: activeId });
-  const storage = await getActor<PoolInfoActor>(agent, activeId, poolInfoidlFactory);
-  const head = await withRetry(() => storage.getBaseRecord(0n, 1n, []), `${activeId} head`, warn);
-  const currentTotal = Number(head.totalElements);
-
-  const prev = state.canisters[activeId];
-  const previousTotal = prev?.lastTotal ?? 0;
-
-  // switching: mark previous latest as completed archival
-  if (state.latestStorageId && state.latestStorageId !== activeId && state.canisters[state.latestStorageId]) {
-    state.canisters[state.latestStorageId].completed = true;
-  }
-
-  if (previousTotal >= currentTotal && previousTotal > 0) {
-    if (previousTotal > currentTotal) {
-      logger.warn('active canister total decreased - possible source reset, skipping without state damage', {
-        storageId: activeId,
-        previousTotal,
-        currentTotal,
-      });
-    } else {
-      logger.info('no new records on active canister', { storageId: activeId, currentTotal });
-    }
-    state.latestStorageId = activeId;
-    state.lastRunAt = new Date().toISOString();
-    await target.saveState(state);
-    return;
-  }
-
-  const fetchFrom = Math.max(0, previousTotal - cfg.overlap);
-  const known = new Set(prev?.recentHashes ?? []);
-  const sink = target.createSink(`incremental_${activeId}.csv`);
-  let offset = fetchFrom;
-  let written = 0;
-  let writeHeader = true;
-
-  while (offset < currentTotal) {
-    const batchSize = Math.min(cfg.pageSize, currentTotal - offset);
-    const page = await withRetry(
-      () => storage.getBaseRecord(BigInt(offset), BigInt(batchSize), []),
-      `${activeId} incremental offset=${offset}`,
-      warn
-    );
-
-    const txs = (page.content || []).filter((tx: SwapTx) => tx.hash && !known.has(tx.hash));
-    const rows = txs.map((tx: SwapTx) => rowFromTx(activeId, tx));
-    await sink.append(rows, writeHeader);
-    writeHeader = false;
-    written += rows.length;
-
-    for (const tx of txs) known.add(tx.hash);
-    // 2x the limit so previous-run hashes survive the overlap window even on big catch-up runs.
-    trimSetKeepLast(known, RECENT_HASHES_LIMIT * 2);
-    offset += batchSize;
-  }
-  const sinkStats = await sink.close();
-
-  state.mode = 'incremental';
-  state.latestStorageId = activeId;
-  state.lastRunAt = new Date().toISOString();
-  state.canisters[activeId] = {
-    lastTotal: currentTotal,
-    lastRun: state.lastRunAt,
-    recentHashes: Array.from(known).slice(-RECENT_HASHES_LIMIT),
-    completed: false,
-  };
-
-  await target.saveState(state);
-  await target.writeManifest(buildManifest(cfg, [{ storageId: activeId, total: currentTotal, written, sink: sinkStats }]));
-  logger.info('incremental done', { storageId: activeId, newRows: written });
+  logger.info('full load done', { rows: totalRows, files: manifestEntries.length, newestStorageId, canisterMaxTxTime: state.canisterMaxTxTime });
 }
 
 async function run(): Promise<void> {
@@ -259,21 +187,27 @@ async function run(): Promise<void> {
   }
 
   try {
-    const agent = new HttpAgent({ host: cfg.host });
-    await agent.syncTime();
-
-    const baseStorage = await getActor<BaseStorageActor>(agent, cfg.baseStorageCanisterId, baseStorageidlFactory);
-    const storages = await withRetry(() => baseStorage.baseStorage(), 'baseStorage list', warn);
-    if (!storages.length) throw new Error('No storage canisters found');
-    logger.info('discovered storage canisters', { count: storages.length });
-
-    const newestStorageId = storages[0];
     const state = await target.loadState();
+    const restDeps: RestDeps = {
+      fetchData: (p) => fetchTransactions(p, warn),
+      now: () => Date.now(),
+    };
 
-    if (cfg.mode === 'full') {
+    if (cfg.mode === 'canister' || cfg.mode === 'full') {
+      const agent = new HttpAgent({ host: cfg.host });
+      await agent.syncTime();
+      const baseStorage = await getActor<BaseStorageActor>(agent, cfg.baseStorageCanisterId, baseStorageidlFactory);
+      const storages = await withRetry(() => baseStorage.baseStorage(), 'baseStorage list', warn);
+      if (!storages.length) throw new Error('No storage canisters found');
+      logger.info('discovered storage canisters', { count: storages.length });
+      const newestStorageId = storages[0];
       await runFull(cfg, agent, target, logger, state, [...storages].reverse(), newestStorageId);
+    } else if (cfg.mode === 'backfill') {
+      await runBackfill(cfg, target, logger, state, restDeps);
+    } else if (cfg.mode === 'incremental') {
+      await runIncrementalRest(cfg, target, logger, state, restDeps);
     } else {
-      await runIncremental(cfg, agent, target, logger, state, newestStorageId);
+      await runSync(cfg, target, logger, state, restDeps);
     }
   } finally {
     await target.releaseRunLock();

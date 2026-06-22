@@ -24,10 +24,16 @@ flowchart LR
     TASK -->|"getBaseRecord (paged queries)"| SC
 ```
 
-The extractor discovers all storage canisters from the base registry, then:
+Since 2026-06-07 the ICPSwap storage canisters stopped receiving new transactions through the `getBaseRecord` path, so ongoing ingestion moved to the ICPSwap REST API (`GET /transaction/find`). The canister path is retained as a one-time deep-history archive because the REST API does not expose the full history.
 
-- **`full` mode** reads every canister (oldest → newest, with bounded concurrency) and writes one CSV per canister.
-- **`incremental` mode** reads only the currently active canister, fetching from the last known offset with a configurable overlap window and hash-based deduplication, and handles the moment ICPSwap rotates to a new active canister.
+Run modes:
+
+- **`canister` mode** (alias `full`) reads every storage canister (oldest → newest, bounded concurrency) and writes one CSV per canister. Run **once** to archive deep history; on completion it records `canisterArchiveComplete` and the canister↔REST seam (`canisterMaxTxTime`) in `state.json`.
+- **`backfill` mode** walks the REST API newest→oldest down to the canister seam minus a configurable overlap, with a fixed `end` snapshot for stable pagination and a resumable page cursor.
+- **`incremental` mode** fetches new REST transactions since the stored `txTime` watermark, with overlap + `txHash` deduplication.
+- **`sync` mode** (default, scheduled) runs `backfill` if it has not completed, then `incremental`. It never runs the canister archive.
+
+**Cutover:** run `--mode canister` once to capture pre-API history; the scheduled `sync` then keeps the dataset current from the REST API and never re-touches the canisters. Canister and REST records have different schemas and land **raw and separate** in S3 (downstream tooling reconciles the overlap band).
 
 ## Key design points
 
@@ -50,20 +56,28 @@ The extractor discovers all storage canisters from the base registry, then:
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--mode` | `full` | `full` or `incremental` |
-| `--page-size` | `1000` | records per canister query (1..1000) |
-| `--concurrency` | `5` | parallel canisters in full mode (1..20) |
-| `--overlap` | `50` | re-fetch window for incremental dedupe |
+| `--mode` | `sync` | `sync`, `canister` (alias `full`), `backfill`, or `incremental` |
+| `--page-size` | `1000` | records per canister query (1..1000), canister mode |
+| `--concurrency` | `5` | parallel canisters in canister mode (1..20) |
+| `--overlap` | `50` | canister-mode re-fetch window |
+| `--rest-base-url` | `https://api.icpswap.com/info` | REST API base URL |
+| `--rest-page-size` | `100` | REST records per page (1..100; API caps at 100) |
+| `--backfill-overlap-ms` | `3600000` | overlap below the canister seam, in ms |
+| `--incremental-overlap-ms` | `300000` | REST incremental re-fetch window, in ms |
+| `--backfill-floor` | — | explicit floor (epoch ms) when `canisterMaxTxTime` is absent |
+| `--action-types` | `Swap,AddLiquidity,DecreaseLiquidity,Claim` | REST `actionTypes` filter |
 | `--s3-bucket` | env `S3_BUCKET` | target bucket; omit for local output |
 | `--s3-prefix` | env `S3_PREFIX` or `icpswap` | key prefix in the bucket |
 | `--out-dir` | `./out` | local output directory (local mode) |
 | `--state-file` | `./out/state.json` | local state path (local mode) |
 
-S3 layout per run:
+S3 layout (source-separated):
 
 ```
-s3://<bucket>/<prefix>/<mode>/<runId>/<nnnn>_<canisterId>.csv
-s3://<bucket>/<prefix>/<mode>/<runId>/manifest.json
+s3://<bucket>/<prefix>/canister/<runId>/<nnnn>_<canisterId>.csv
+s3://<bucket>/<prefix>/rest/backfill/<runId>/transactions_backfill_<runId>.csv
+s3://<bucket>/<prefix>/rest/incremental/<runId>/transactions_incremental_<runId>.csv
+s3://<bucket>/<prefix>/<segment>/<runId>/manifest.json
 s3://<bucket>/<prefix>/state/state.json
 ```
 
@@ -71,8 +85,10 @@ s3://<bucket>/<prefix>/state/state.json
 
 ```bash
 npm install
-npm run dev -- --mode full --page-size 1000 --concurrency 5
-npm run dev -- --mode incremental --overlap 50
+npm run dev -- --mode canister --page-size 1000 --concurrency 5   # one-time deep-history archive
+npm run dev -- --mode backfill                                     # REST history down to the seam
+npm run dev -- --mode incremental                                  # new REST transactions
+npm run dev -- --mode sync                                         # backfill-if-needed then incremental
 npm test
 ```
 
@@ -104,8 +120,8 @@ By default the compute stack uses the account's default VPC for low-friction eva
 Build, push, and trigger a one-off run with the helper (reads everything from Terraform outputs):
 
 ```bash
-scripts/aws_build_push_and_run.sh --mode full
-scripts/aws_build_push_and_run.sh --mode incremental
+scripts/aws_build_push_and_run.sh --mode canister   # one-time deep-history archive
+scripts/aws_build_push_and_run.sh --mode sync       # scheduled path: backfill-if-needed + REST incremental
 scripts/aws_build_push_and_run.sh --build-only
 ```
 
@@ -118,15 +134,19 @@ cd terraform/aws-compute && terraform destroy
 ## Project layout
 
 ```
-src/index.ts               entrypoint: discovery + runFull/runIncremental orchestration
+src/index.ts               entrypoint: mode dispatch + canister archive (runFull)
 src/lib/config.ts          CLI parsing + validation
-src/lib/csv.ts             swap transaction -> CSV row mapping
-src/lib/csvSink.ts         streaming sinks (local file, S3 multipart) with checksums
+src/lib/csv.ts             canister swap transaction -> CSV row mapping
+src/lib/csvSink.ts         schema-driven streaming sinks (local file, S3 multipart) with checksums
+src/lib/restClient.ts      ICPSwap /transaction/find REST client (paged, retried)
+src/lib/restCsv.ts         REST record -> raw CSV row mapping
+src/lib/restPaging.ts      backfill/incremental paging + dedup helpers
+src/lib/restRuns.ts        runBackfill / runIncrementalRest / runSync orchestration
 src/lib/logger.ts          structured JSON-lines logger
 src/lib/retry.ts           bounded exponential-backoff retry
-src/lib/state.ts           resume-state schema, parsing, persistence, hash bounds
+src/lib/state.ts           resume-state schema (canister seam + REST cursor/watermark)
 src/lib/storageTarget.ts   StorageTarget interface: local | S3 (state, sinks, manifest, run lock)
-src/idl/                   Candid interfaces for the ICPSwap canisters
+src/idl/                   Candid interfaces (canisters) + REST record type
 tests/                     node:test suites for the pure logic
 docs/RUNBOOK.md            local runs, tests, AWS deployment, operations, teardown
 terraform/                 aws-storage + aws-compute roots

@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   RECENT_HASHES_LIMIT,
+  defaultRestState,
   defaultState,
   loadState,
   parseState,
@@ -29,6 +30,33 @@ test('parseState parses the current schema', () => {
   assert.equal(state.latestStorageId, 'aaaaa-aa');
   assert.equal(state.canisters['aaaaa-aa'].lastTotal, 42);
   assert.deepEqual(state.canisters['aaaaa-aa'].recentHashes, ['h1', 'h2']);
+});
+
+test('parseState preserves rest + canister-seam fields', () => {
+  const state = parseState(
+    JSON.stringify({
+      mode: 'incremental',
+      canisters: {},
+      canisterArchiveComplete: true,
+      canisterMaxTxTime: 1749254400000,
+      rest: {
+        backfillComplete: false,
+        backfillCursor: { endSnapshot: 1782127219000, nextPage: 137 },
+        backfillFloor: 1749254400000,
+        incrementalWatermark: 1782200000000,
+        recentTxHashes: ['ttnzy-244431'],
+      },
+    })
+  );
+
+  assert.equal(state.canisterArchiveComplete, true);
+  assert.equal(state.canisterMaxTxTime, 1749254400000);
+  assert.equal(state.rest?.backfillCursor?.nextPage, 137);
+  assert.deepEqual(state.rest?.recentTxHashes, ['ttnzy-244431']);
+});
+
+test('defaultRestState starts with an empty hash list', () => {
+  assert.deepEqual(defaultRestState(), { recentTxHashes: [] });
 });
 
 test('parseState migrates the legacy single-canister schema', () => {

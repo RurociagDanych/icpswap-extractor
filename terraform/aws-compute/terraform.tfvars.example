@@ -15,15 +15,14 @@ subnet_ids = []
 # Optional. Leave empty to use the managed ECR repository with the :latest tag.
 container_image = ""
 
+# Scheduled runs use 'sync' (backfill-if-needed, then REST incremental against the
+# ICPSwap /transaction/find API). Run the one-time canister archive manually with
+# scripts/aws_build_push_and_run.sh --mode canister before relying on sync.
 container_command = [
   "node",
   "dist/index.js",
   "--mode",
-  "incremental",
-  "--page-size",
-  "1000",
-  "--concurrency",
-  "5",
+  "sync",
 ]
 
 s3_prefix           = "icpswap"

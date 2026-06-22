@@ -7,17 +7,30 @@ export type CanisterState = {
   completed?: boolean; // archival/full-complete marker
 };
 
+export type RestState = {
+  backfillComplete?: boolean;
+  backfillCursor?: { endSnapshot: number; nextPage: number };
+  backfillFloor?: number;
+  incrementalWatermark?: number;
+  recentTxHashes: string[];
+};
+
 export type EtlState = {
-  mode: 'full' | 'incremental';
+  mode: 'full' | 'incremental' | 'canister' | 'backfill' | 'sync';
   lastRunAt?: string;
   latestStorageId?: string;
   canisters: Record<string, CanisterState>;
+  canisterArchiveComplete?: boolean;
+  canisterMaxTxTime?: number;
+  rest?: RestState;
 };
 
 export const defaultState = (): EtlState => ({
   mode: 'full',
   canisters: {},
 });
+
+export const defaultRestState = (): RestState => ({ recentTxHashes: [] });
 
 // Cap on remembered tx hashes: must comfortably exceed the largest --overlap
 // anyone would pass, while keeping state.json and run memory small.

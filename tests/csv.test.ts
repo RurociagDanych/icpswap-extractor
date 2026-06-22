@@ -73,7 +73,7 @@ test('LocalCsvSink writes header, escapes special characters, and reports stats'
     makeTx({ hash: 'def456', sender: 'evil,"sender"\nline2', token0Symbol: 'A,B' })
   );
 
-  const sink = new LocalCsvSink(file);
+  const sink = new LocalCsvSink(file, headers);
   await sink.append([plain], true);
   await sink.append([tricky], false);
   const stats = await sink.close();
@@ -95,10 +95,23 @@ test('LocalCsvSink rejects writes after close', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'icpswap-extractor-csv-'));
   const file = path.join(dir, 'out.csv');
 
-  const sink = new LocalCsvSink(file);
+  const sink = new LocalCsvSink(file, headers);
   await sink.append([rowFromTx('s', makeTx())], true);
   await sink.close();
 
   await assert.rejects(() => sink.append([], false), /already closed/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('LocalCsvSink writes arbitrary columns with header + checksum', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'icpswap-sink-'));
+  const file = path.join(dir, 'out.csv');
+  const sink = new LocalCsvSink(file, ['a', 'b']);
+  await sink.append([{ a: 'x', b: 1 }], true);
+  const stats = await sink.close();
+
+  assert.equal(fs.readFileSync(file, 'utf8'), 'a,b\nx,1\n');
+  assert.equal(stats.rows, 1);
+  assert.ok(stats.sha256.length === 64);
   fs.rmSync(dir, { recursive: true, force: true });
 });

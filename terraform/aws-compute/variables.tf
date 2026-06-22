@@ -61,8 +61,10 @@ variable "container_memory" {
 }
 
 variable "container_command" {
-  type    = list(string)
-  default = ["node", "dist/index.js", "--mode", "incremental", "--page-size", "1000", "--concurrency", "5"]
+  type = list(string)
+  # Scheduled runs use 'sync': backfill-if-needed then REST incremental. The
+  # one-time canister archive is run manually (scripts/aws_build_push_and_run.sh --mode canister).
+  default = ["node", "dist/index.js", "--mode", "sync"]
 }
 
 variable "s3_prefix" {

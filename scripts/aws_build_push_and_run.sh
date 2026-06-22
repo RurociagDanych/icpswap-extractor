@@ -7,7 +7,11 @@ Usage:
   scripts/aws_build_push_and_run.sh [options]
 
 Options:
-  --mode <full|incremental>   ETL mode for the one-off ECS run. Default: incremental
+  --mode <sync|canister|backfill|incremental|full>
+                              ETL mode for the one-off ECS run. Default: sync.
+                              'canister' (alias 'full') runs the one-time deep-history
+                              archive; 'backfill'/'incremental' use the REST API;
+                              'sync' runs backfill-if-needed then REST incremental.
   --tag <tag>                 Image tag to build and push. Default: latest
   --terraform-dir <path>      Terraform AWS compute root. Default: terraform/aws-compute
   --page-size <n>             Override page size for the one-off ECS run. Default: 1000
@@ -39,7 +43,7 @@ require_cmd() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-MODE="incremental"
+MODE="sync"
 IMAGE_TAG="latest"
 TF_DIR="${REPO_ROOT}/terraform/aws-compute"
 PAGE_SIZE="1000"
@@ -106,10 +110,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "${MODE}" != "full" && "${MODE}" != "incremental" ]]; then
-  echo "Invalid --mode '${MODE}'. Expected 'full' or 'incremental'." >&2
-  exit 1
-fi
+case "${MODE}" in
+  sync|canister|backfill|incremental|full) ;;
+  *)
+    echo "Invalid --mode '${MODE}'. Expected one of: sync, canister, backfill, incremental, full." >&2
+    exit 1
+    ;;
+esac
 
 require_cmd aws
 require_cmd docker
@@ -189,9 +196,11 @@ OVERRIDES_JSON="$(
   OVERLAP="${OVERLAP}" \
   node --input-type=module -e '
     const mode = process.env.MODE;
-    const command = ["node", "dist/index.js", "--mode", mode, "--page-size", process.env.PAGE_SIZE, "--concurrency", process.env.CONCURRENCY];
-    if (mode === "incremental") {
-      command.push("--overlap", process.env.OVERLAP);
+    const command = ["node", "dist/index.js", "--mode", mode];
+    // Canister archive (one-time) uses page-size/concurrency/overlap; REST modes
+    // (sync/backfill/incremental) rely on their own configured defaults.
+    if (mode === "canister" || mode === "full") {
+      command.push("--page-size", process.env.PAGE_SIZE, "--concurrency", process.env.CONCURRENCY, "--overlap", process.env.OVERLAP);
     }
     process.stdout.write(JSON.stringify({
       containerOverrides: [{ name: "etl", command }]

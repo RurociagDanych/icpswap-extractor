@@ -9,7 +9,7 @@ delete process.env.S3_PREFIX;
 test('parseArgs applies defaults', () => {
   const cfg = parseArgs([]);
 
-  assert.equal(cfg.mode, 'full');
+  assert.equal(cfg.mode, 'sync');
   assert.equal(cfg.host, 'https://ic0.app');
   assert.equal(cfg.pageSize, 1000);
   assert.equal(cfg.overlap, 50);
@@ -49,4 +49,32 @@ test('parseArgs rejects concurrency outside 1..20', () => {
 
 test('parseArgs rejects negative overlap', () => {
   assert.throws(() => parseArgs(['--overlap', '-1']), /overlap/);
+});
+
+test('parseArgs reads REST flags and defaults mode to sync', () => {
+  const cfg = parseArgs([]);
+  assert.equal(cfg.mode, 'sync');
+  assert.equal(cfg.restBaseUrl, 'https://api.icpswap.com/info');
+  assert.equal(cfg.restPageSize, 100);
+  assert.equal(cfg.backfillOverlapMs, 3600000);
+  assert.equal(cfg.incrementalOverlapMs, 300000);
+  assert.equal(cfg.actionTypes, 'Swap,AddLiquidity,DecreaseLiquidity,Claim');
+  assert.equal(cfg.backfillFloor, undefined);
+});
+
+test('parseArgs parses explicit REST flags', () => {
+  const cfg = parseArgs([
+    '--mode', 'backfill',
+    '--rest-page-size', '50',
+    '--backfill-overlap-ms', '60000',
+    '--backfill-floor', '1749254400000',
+  ]);
+  assert.equal(cfg.mode, 'backfill');
+  assert.equal(cfg.restPageSize, 50);
+  assert.equal(cfg.backfillOverlapMs, 60000);
+  assert.equal(cfg.backfillFloor, 1749254400000);
+});
+
+test('parseArgs rejects rest-page-size above 100', () => {
+  assert.throws(() => parseArgs(['--rest-page-size', '101']), /rest-page-size/);
 });

@@ -16,7 +16,7 @@ export type ManifestEntry = {
 export type Manifest = {
   schemaVersion: 1;
   runId: string;
-  mode: 'full' | 'incremental';
+  mode: Config['mode'];
   generatedAt: string;
   entries: ManifestEntry[];
   totals: { files: number; rows: number; bytes: number };
@@ -36,6 +36,15 @@ function lockIsStale(body: string | undefined): boolean {
     return !Number.isFinite(startedAt) || Date.now() - startedAt > LOCK_TTL_MS;
   } catch {
     return true;
+  }
+}
+
+export function modePathSegment(mode: Config['mode']): string {
+  switch (mode) {
+    case 'backfill': return 'rest/backfill';
+    case 'incremental': return 'rest/incremental';
+    case 'sync': return 'rest/incremental';
+    default: return 'canister'; // 'canister' | 'full'
   }
 }
 
@@ -60,7 +69,7 @@ export interface StorageTarget {
   readonly supportsResumeSkip: boolean;
   loadState(): Promise<EtlState>;
   saveState(state: EtlState): Promise<void>;
-  createSink(fileName: string): CsvSink;
+  createSink(fileName: string, columns: readonly string[]): CsvSink;
   writeManifest(manifest: Manifest): Promise<void>;
   acquireRunLock(): Promise<boolean>;
   releaseRunLock(): Promise<void>;
@@ -90,8 +99,8 @@ export class LocalTarget implements StorageTarget {
     saveState(this.stateFile, state);
   }
 
-  createSink(fileName: string): CsvSink {
-    return new LocalCsvSink(path.join(this.outDir, fileName));
+  createSink(fileName: string, columns: readonly string[]): CsvSink {
+    return new LocalCsvSink(path.join(this.outDir, fileName), columns);
   }
 
   async writeManifest(manifest: Manifest): Promise<void> {
@@ -122,7 +131,7 @@ export class S3Target implements StorageTarget {
   readonly supportsResumeSkip = false;
   private readonly bucket: string;
   private readonly prefix: string;
-  private readonly mode: 'full' | 'incremental';
+  private readonly mode: Config['mode'];
   private readonly runId: string;
 
   constructor(
@@ -146,7 +155,7 @@ export class S3Target implements StorageTarget {
   }
 
   private runKey(fileName: string): string {
-    return `${this.prefix}/${this.mode}/${this.runId}/${fileName}`;
+    return `${this.prefix}/${modePathSegment(this.mode)}/${this.runId}/${fileName}`;
   }
 
   private async readText(key: string): Promise<string | undefined> {
@@ -181,9 +190,9 @@ export class S3Target implements StorageTarget {
     );
   }
 
-  createSink(fileName: string): CsvSink {
+  createSink(fileName: string, columns: readonly string[]): CsvSink {
     const key = this.runKey(fileName);
-    return new S3CsvSink(this.s3, this.bucket, key, `s3://${this.bucket}/${key}`);
+    return new S3CsvSink(this.s3, this.bucket, key, `s3://${this.bucket}/${key}`, columns);
   }
 
   async writeManifest(manifest: Manifest): Promise<void> {

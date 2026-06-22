@@ -6,7 +6,14 @@ import path from 'node:path';
 import type { S3Client } from '@aws-sdk/client-s3';
 import type { Config } from '../src/lib/config.js';
 import { defaultState } from '../src/lib/state.js';
-import { LOCK_TTL_MS, LocalTarget, S3Target, buildManifest, type ManifestEntry } from '../src/lib/storageTarget.js';
+import { LOCK_TTL_MS, LocalTarget, S3Target, buildManifest, modePathSegment, type ManifestEntry } from '../src/lib/storageTarget.js';
+
+test('modePathSegment separates sources', () => {
+  assert.equal(modePathSegment('canister'), 'canister');
+  assert.equal(modePathSegment('full'), 'canister');
+  assert.equal(modePathSegment('backfill'), 'rest/backfill');
+  assert.equal(modePathSegment('incremental'), 'rest/incremental');
+});
 
 function makeCfg(overrides: Partial<Config> = {}): Config {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'icpswap-extractor-target-'));
@@ -130,7 +137,7 @@ test('S3Target writes the manifest under the runId prefix', async () => {
   await target.writeManifest(buildManifest(cfg, sampleEntries()));
 
   assert.equal(sent[0].name, 'PutObjectCommand');
-  assert.equal(sent[0].input.Key, 'icpswap/incremental/run-1/manifest.json');
+  assert.equal(sent[0].input.Key, 'icpswap/rest/incremental/run-1/manifest.json');
 });
 
 test('LocalTarget lock: acquire, conflict, release, reacquire', async () => {

@@ -27,6 +27,7 @@ export async function runBackfill(cfg: Config, target: StorageTarget, logger: Lo
   const sink = target.createSink(`transactions_backfill_${cfg.runId}.csv`, restHeaders);
   let written = 0;
   let total = 0;
+  let maxSeen = 0;
   let writeHeader = true;
 
   for (;;) {
@@ -41,6 +42,7 @@ export async function runBackfill(cfg: Config, target: StorageTarget, logger: Lo
     await sink.append(content.map(rowFromRestTx), writeHeader);
     writeHeader = false;
     written += content.length;
+    maxSeen = maxTxTime(content, maxSeen);
 
     rest.backfillCursor = { endSnapshot, nextPage: page + 1 };
     rest.backfillFloor = floor;
@@ -53,6 +55,11 @@ export async function runBackfill(cfg: Config, target: StorageTarget, logger: Lo
 
   const stats = await sink.close();
   rest.backfillComplete = true;
+  // Seed the incremental watermark to the newest record backfill captured (it pages
+  // from the snapshot down to the floor, so page 1 holds the newest rows). Without
+  // this, the first incremental run would rescan the entire REST history.
+  const seed = maxSeen > 0 ? maxSeen : endSnapshot;
+  if ((rest.incrementalWatermark ?? 0) < seed) rest.incrementalWatermark = seed;
   state.rest = rest;
   state.mode = 'backfill';
   state.lastRunAt = new Date().toISOString();

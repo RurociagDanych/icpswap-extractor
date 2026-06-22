@@ -48,6 +48,7 @@ test('runBackfill pages newest->oldest and stops below floor', async () => {
   assert.equal(sinks[0].rows.length, 4);             // all 4 rows emitted
   assert.equal(sinks[0].columns[0], 'tx_hash');      // REST headers used
   assert.equal(getSaved()?.rest?.backfillComplete, true);
+  assert.equal(getSaved()?.rest?.incrementalWatermark, 300); // seeded to newest captured txTime
 });
 
 test('runIncrementalRest emits only rows past the watermark and dedups', async () => {
